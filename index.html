@@ -359,12 +359,58 @@ async function flushWithTimeout(decoder, timeoutMs = FLUSH_TIMEOUT) {
     }
 }
 
+// Check if decoder is usable
+function isDecoderReady() {
+    return videoDecoder && videoDecoder.state !== 'closed' && videoDecoder.state !== 'unconfigured';
+}
+
+// Decode a valid keyframe first to prime the decoder
+async function primeDecoder() {
+    if (encodedVideoChunks.length === 0) {
+        log('No valid chunks to prime decoder', 'error');
+        return false;
+    }
+    
+    const original = encodedVideoChunks[0].chunk;
+    if (original.type !== 'key') {
+        log('First chunk is not a keyframe, cannot prime', 'error');
+        return false;
+    }
+    
+    try {
+        // Copy the valid keyframe data
+        const buf = new Uint8Array(original.byteLength);
+        original.copyTo(buf);
+        
+        const keyChunk = new EncodedVideoChunk({
+            type: 'key',
+            timestamp: 0,  // Start from 0
+            data: buf
+        });
+        
+        videoDecoder.decode(keyChunk);
+        await flushWithTimeout(videoDecoder);
+        log('Decoder primed with valid keyframe', 'info');
+        return true;
+    } catch (e) {
+        log(`Failed to prime decoder: ${e.message}`, 'error');
+        return false;
+    }
+}
+
 // Test: Empty data injection
 async function testEmptyData() {
     log('Running: Empty Data Injection', 'warn');
     
+    if (!isDecoderReady()) {
+        log('Decoder not ready, skipping test', 'error');
+        return;
+    }
+    
+    // Use delta type since empty data can't be a valid keyframe
+    // This tests how decoder handles zero-byte delta frames after priming
     const emptyChunk = new EncodedVideoChunk({
-        type: "key",
+        type: "delta",
         timestamp: 1000000,
         data: new Uint8Array(0)
     });
@@ -382,6 +428,11 @@ async function testEmptyData() {
 async function testTypeConfusion() {
     log('Running: Type Confusion Attack', 'warn');
     
+    if (!isDecoderReady()) {
+        log('Decoder not ready, skipping test', 'error');
+        return;
+    }
+    
     if (encodedVideoChunks.length === 0) {
         log('No encoded chunks available', 'error');
         return;
@@ -397,7 +448,7 @@ async function testTypeConfusion() {
     
     const confusedChunk = new EncodedVideoChunk({
         type: confusedType,
-        timestamp: original.timestamp,
+        timestamp: Date.now() * 1000,  // New timestamp to avoid conflicts
         data: buf
     });
     
@@ -414,6 +465,11 @@ async function testTypeConfusion() {
 async function testTruncated() {
     log('Running: Truncated Data Attack', 'warn');
     
+    if (!isDecoderReady()) {
+        log('Decoder not ready, skipping test', 'error');
+        return;
+    }
+    
     if (encodedVideoChunks.length === 0) {
         log('No encoded chunks available', 'error');
         return;
@@ -427,9 +483,10 @@ async function testTruncated() {
     const truncated = originalData.slice(0, 10);
     log(`Truncating ${original.byteLength} → 10 bytes`, 'info');
     
+    // Use delta type since truncated data is unlikely to be valid keyframe
     const truncatedChunk = new EncodedVideoChunk({
-        type: original.type,
-        timestamp: original.timestamp,
+        type: 'delta',
+        timestamp: Date.now() * 1000,
         data: truncated
     });
     
@@ -483,6 +540,30 @@ async function runTest(type) {
     }
 }
 
+// Test: Timestamp manipulation
+async function testTimestampManipulation() {
+    log('\nRunning: Timestamp Manipulation', 'warn');
+    
+    if (!isDecoderReady()) {
+        log('Decoder not ready, skipping test', 'error');
+        return;
+    }
+    
+    // Test negative timestamp
+    const negativeChunk = new EncodedVideoChunk({
+        type: "delta",
+        timestamp: -999999999,
+        data: new Uint8Array(10)
+    });
+    try {
+        videoDecoder.decode(negativeChunk);
+        log('Negative timestamp chunk submitted');
+        await flushWithTimeout(videoDecoder);
+    } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+    }
+}
+
 // Run all tests
 async function runAllTests() {
     if (isRunning) return;
@@ -501,28 +582,24 @@ async function runAllTests() {
         
         log('\n=== Starting All Tests ===', 'success');
         
+        // Prime decoder with valid keyframe first
+        const primed = await primeDecoder();
+        if (!primed) {
+            log('Failed to prime decoder - aborting', 'error');
+            return;
+        }
+        await new Promise(r => setTimeout(r, 200));
+        
         await testEmptyData();
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 200));
         
         await testTypeConfusion();
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 200));
         
         await testTruncated();
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 200));
         
-        // Negative timestamp test
-        log('\nRunning: Timestamp Manipulation', 'warn');
-        const negativeChunk = new EncodedVideoChunk({
-            type: "key",
-            timestamp: -999999999,
-            data: new Uint8Array(10)
-        });
-        try {
-            videoDecoder.decode(negativeChunk);
-            log('Negative timestamp chunk submitted');
-        } catch (e) {
-            log(`Error: ${e.message}`, 'error');
-        }
+        await testTimestampManipulation();
         
         log('\n=== All Tests Completed ===', 'success');
     } catch (e) {
