@@ -1,0 +1,22 @@
+{
+  "name": "webcodecs-decoder-poc",
+  "version": "1.0.0",
+  "description": "WebCodecs VideoDecoder vulnerability research tool",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve .",
+    "dev": "npx serve . -l 3000"
+  },
+  "keywords": [
+    "webcodecs",
+    "webkit",
+    "security",
+    "research",
+    "vulnerability"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/webcodecs-decoder-poc"
+  }
+}

