@@ -149,11 +149,27 @@
 // ============================================================================
 
 const CONFIG = {
-    codec: "vp8",
     width: 320,
     height: 240,
-    maxStoredChunks: 20
+    maxStoredChunks: 20,
+    
+    // Codec candidates in order of preference
+    // Different engines prefer different codec strings
+    codecCandidates: [
+        { codec: "vp8", label: "VP8" },                    // Universal baseline
+        { codec: "vp09.00.10.08", label: "VP9" },         // Chromium preferred
+        { codec: "vp9", label: "VP9 (Gecko)" },           // Gecko preferred
+    ]
 };
+
+// Detect browser engine
+function detectEngine() {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes('firefox') || ua.includes('gecko')) return 'gecko';
+    if (ua.includes('chrome') || ua.includes('chromium') || ua.includes('edge')) return 'chromium';
+    if (ua.includes('safari') && !ua.includes('chrome')) return 'webkit';
+    return 'unknown';
+}
 
 let encodedVideoChunks = [];
 let lastVideoDecoderConfig = null;
@@ -187,6 +203,7 @@ function checkSupport() {
     const hasChunk = typeof EncodedVideoChunk !== 'undefined';
     
     const statusEl = document.getElementById('api-status');
+    const engine = detectEngine();
     
     if (hasEncoder && hasDecoder && hasFrame && hasChunk) {
         statusEl.textContent = 'Ready';
@@ -196,6 +213,18 @@ function checkSupport() {
         statusEl.textContent = 'Not Supported';
         statusEl.className = 'status unsupported';
         log('WebCodecs API not supported in this browser', 'error');
+        
+        if (engine === 'gecko') {
+            log('Firefox: Enable WebCodecs in about:config', 'warn');
+            log('  1. Type about:config in address bar', 'warn');
+            log('  2. Search for dom.media.webcodecs.enabled', 'warn');
+            log('  3. Set to true', 'warn');
+            log('  4. Restart browser', 'warn');
+        } else if (engine === 'chromium') {
+            log('Chromium: WebCodecs should be enabled by default', 'warn');
+            log('Try chrome://flags/#enable-webcodecs', 'warn');
+        }
+        
         return false;
     }
 }
@@ -224,11 +253,54 @@ async function initCodecs() {
         error: (e) => log(`Decoder error: ${e.message}`, 'error')
     });
 
-    videoEncoder.configure({
-        codec: CONFIG.codec,
-        width: CONFIG.width,
-        height: CONFIG.height
-    });
+    // Find a working codec
+    let selectedCodec = null;
+    let encoderConfig = null;
+    
+    const engine = detectEngine();
+    log(`Detected engine: ${engine}`);
+    
+    // Reorder candidates based on engine
+    let candidates = [...CONFIG.codecCandidates];
+    if (engine === 'gecko') {
+        // Gecko prefers simpler codec strings
+        candidates.sort((a, b) => {
+            if (a.codec === 'vp9') return -1;
+            if (b.codec === 'vp9') return 1;
+            return 0;
+        });
+    }
+    
+    for (const candidate of candidates) {
+        encoderConfig = {
+            codec: candidate.codec,
+            width: CONFIG.width,
+            height: CONFIG.height,
+            bitrate: 1000000,
+            framerate: 30,
+            latencyMode: 'quality',
+            hardwareAcceleration: 'prefer-software'  // More consistent across engines
+        };
+        
+        try {
+            const support = await VideoEncoder.isConfigSupported(encoderConfig);
+            if (support.supported) {
+                selectedCodec = candidate;
+                log(`Using codec: ${candidate.label} (${candidate.codec})`);
+                break;
+            }
+        } catch (e) {
+            log(`Codec check failed for ${candidate.codec}: ${e.message}`, 'warn');
+        }
+    }
+    
+    if (!selectedCodec) {
+        log("No supported codec found. WebCodecs may not be enabled.", 'error');
+        log("Firefox: set dom.media.webcodecs.enabled=true in about:config", 'warn');
+        return false;
+    }
+    
+    videoEncoder.configure(encoderConfig);
 
     // Create and encode a frame
     const canvas = document.getElementById('c');
@@ -242,11 +314,36 @@ async function initCodecs() {
     
     await videoEncoder.flush();
     
+    // Configure decoder
     if (lastVideoDecoderConfig) {
-        videoDecoder.configure(lastVideoDecoderConfig);
+        const decoderConfig = {
+            ...lastVideoDecoderConfig,
+            codec: encoderConfig.codec
+        };
+        videoDecoder.configure(decoderConfig);
+        log(`Initialized - ${encodedVideoChunks.length} chunks buffered`);
+    } else {
+        // Fallback: create decoder config manually
+        const fallbackConfig = {
+            codec: encoderConfig.codec,
+            codedWidth: CONFIG.width,
+            codedHeight: CONFIG.height
+        };
+        try {
+            const decoderSupport = await VideoDecoder.isConfigSupported(fallbackConfig);
+            if (decoderSupport.supported) {
+                videoDecoder.configure(fallbackConfig);
+                log(`Initialized (fallback) - ${encodedVideoChunks.length} chunks buffered`);
+            } else {
+                log('Decoder configuration not supported', 'error');
+                return false;
+            }
+        } catch (e) {
+            log(`Decoder config error: ${e.message}`, 'error');
+            return false;
+        }
     }
     
-    log(`Initialized - ${encodedVideoChunks.length} chunks buffered`);
     return true;
 }
 
@@ -358,7 +455,11 @@ async function runTest(type) {
     try {
         if (encodedVideoChunks.length === 0) {
             log('Initializing codecs...');
-            await initCodecs();
+            const initialized = await initCodecs();
+            if (!initialized) {
+                log('Initialization failed - aborting test', 'error');
+                return;
+            }
         }
         
         switch (type) {
@@ -392,7 +493,11 @@ async function runAllTests() {
     
     try {
         log('Initializing...');
-        await initCodecs();
+        const initialized = await initCodecs();
+        if (!initialized) {
+            log('Initialization failed - aborting tests', 'error');
+            return;
+        }
         
         log('\n=== Starting All Tests ===', 'success');
         

