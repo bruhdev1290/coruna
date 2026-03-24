@@ -131,6 +131,12 @@
             <button onclick="runAllTests()" id="btn-all">Run All Tests</button>
         </div>
 
+        <div class="technique">
+            <strong>Controls</strong>
+            <p>Reset or cancel ongoing tests.</p>
+            <button onclick="cancelTests()" id="btn-cancel" style="background: #da3633;">Cancel / Reset</button>
+        </div>
+
         <h3>Execution Log</h3>
         <div id="log"></div>
 
@@ -154,6 +160,9 @@ let lastVideoDecoderConfig = null;
 let videoEncoder = null;
 let videoDecoder = null;
 let isRunning = false;
+let abortController = null;
+
+const FLUSH_TIMEOUT = 5000; // 5 second timeout for flush operations
 
 // Logger
 function log(msg, type = 'info') {
@@ -241,6 +250,18 @@ async function initCodecs() {
     return true;
 }
 
+// Helper: Flush with timeout
+async function flushWithTimeout(decoder, timeoutMs = FLUSH_TIMEOUT) {
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Flush timeout')), timeoutMs);
+    });
+    try {
+        await Promise.race([decoder.flush(), timeoutPromise]);
+    } catch (e) {
+        log(`Flush issue: ${e.message}`, 'warn');
+    }
+}
+
 // Test: Empty data injection
 async function testEmptyData() {
     log('Running: Empty Data Injection', 'warn');
@@ -254,7 +275,7 @@ async function testEmptyData() {
     try {
         videoDecoder.decode(emptyChunk);
         log('Empty chunk submitted (may crash async)', 'info');
-        await videoDecoder.flush().catch(() => {});
+        await flushWithTimeout(videoDecoder);
     } catch (e) {
         log(`Error: ${e.message}`, 'error');
     }
@@ -286,7 +307,7 @@ async function testTypeConfusion() {
     try {
         videoDecoder.decode(confusedChunk);
         log('Confused chunk submitted', 'info');
-        await videoDecoder.flush().catch(() => {});
+        await flushWithTimeout(videoDecoder);
     } catch (e) {
         log(`Error: ${e.message}`, 'error');
     }
@@ -318,7 +339,7 @@ async function testTruncated() {
     try {
         videoDecoder.decode(truncatedChunk);
         log('Truncated chunk submitted', 'info');
-        await videoDecoder.flush().catch(() => {});
+        await flushWithTimeout(videoDecoder);
     } catch (e) {
         log(`Error: ${e.message}`, 'error');
     }
@@ -334,26 +355,31 @@ async function runTest(type) {
     isRunning = true;
     setButtonsDisabled(true);
     
-    if (encodedVideoChunks.length === 0) {
-        log('Initializing codecs...');
-        await initCodecs();
+    try {
+        if (encodedVideoChunks.length === 0) {
+            log('Initializing codecs...');
+            await initCodecs();
+        }
+        
+        switch (type) {
+            case 'empty':
+                await testEmptyData();
+                break;
+            case 'type-confusion':
+                await testTypeConfusion();
+                break;
+            case 'truncated':
+                await testTruncated();
+                break;
+        }
+        
+        log('Test completed');
+    } catch (e) {
+        log(`Test failed: ${e.message}`, 'error');
+    } finally {
+        isRunning = false;
+        setButtonsDisabled(false);
     }
-    
-    switch (type) {
-        case 'empty':
-            await testEmptyData();
-            break;
-        case 'type-confusion':
-            await testTypeConfusion();
-            break;
-        case 'truncated':
-            await testTruncated();
-            break;
-    }
-    
-    log('Test completed');
-    isRunning = false;
-    setButtonsDisabled(false);
 }
 
 // Run all tests
@@ -364,49 +390,79 @@ async function runAllTests() {
     isRunning = true;
     setButtonsDisabled(true);
     
-    log('Initializing...');
-    await initCodecs();
-    
-    log('\n=== Starting All Tests ===', 'success');
-    
-    await testEmptyData();
-    await new Promise(r => setTimeout(r, 500));
-    
-    await testTypeConfusion();
-    await new Promise(r => setTimeout(r, 500));
-    
-    await testTruncated();
-    await new Promise(r => setTimeout(r, 500));
-    
-    // Negative timestamp test
-    log('\nRunning: Timestamp Manipulation', 'warn');
-    const negativeChunk = new EncodedVideoChunk({
-        type: "key",
-        timestamp: -999999999,
-        data: new Uint8Array(10)
-    });
     try {
-        videoDecoder.decode(negativeChunk);
-        log('Negative timestamp chunk submitted');
+        log('Initializing...');
+        await initCodecs();
+        
+        log('\n=== Starting All Tests ===', 'success');
+        
+        await testEmptyData();
+        await new Promise(r => setTimeout(r, 500));
+        
+        await testTypeConfusion();
+        await new Promise(r => setTimeout(r, 500));
+        
+        await testTruncated();
+        await new Promise(r => setTimeout(r, 500));
+        
+        // Negative timestamp test
+        log('\nRunning: Timestamp Manipulation', 'warn');
+        const negativeChunk = new EncodedVideoChunk({
+            type: "key",
+            timestamp: -999999999,
+            data: new Uint8Array(10)
+        });
+        try {
+            videoDecoder.decode(negativeChunk);
+            log('Negative timestamp chunk submitted');
+        } catch (e) {
+            log(`Error: ${e.message}`, 'error');
+        }
+        
+        log('\n=== All Tests Completed ===', 'success');
     } catch (e) {
-        log(`Error: ${e.message}`, 'error');
+        log(`Test suite failed: ${e.message}`, 'error');
+    } finally {
+        // Cleanup
+        try { videoEncoder?.close(); } catch (e) {}
+        try { videoDecoder?.close(); } catch (e) {}
+        encodedVideoChunks = [];
+        
+        isRunning = false;
+        setButtonsDisabled(false);
     }
-    
-    log('\n=== All Tests Completed ===', 'success');
-    
-    // Cleanup
-    videoEncoder?.close();
-    videoDecoder?.close();
-    encodedVideoChunks = [];
-    
-    isRunning = false;
-    setButtonsDisabled(false);
 }
 
 function setButtonsDisabled(disabled) {
     ['btn-empty', 'btn-type', 'btn-truncated', 'btn-all'].forEach(id => {
-        document.getElementById(id).disabled = disabled;
+        const btn = document.getElementById(id);
+        if (btn) btn.disabled = disabled;
     });
+}
+
+// Cancel/Reset function
+function cancelTests() {
+    log('Cancelling/Resetting...', 'warn');
+    
+    // Clean up encoder/decoder
+    try {
+        videoEncoder?.close();
+    } catch (e) {}
+    try {
+        videoDecoder?.close();
+    } catch (e) {}
+    
+    // Reset state
+    videoEncoder = null;
+    videoDecoder = null;
+    encodedVideoChunks = [];
+    lastVideoDecoderConfig = null;
+    isRunning = false;
+    
+    // Re-enable buttons
+    setButtonsDisabled(false);
+    
+    log('Reset complete. Ready for new tests.', 'success');
 }
 
 // Initialize on load
