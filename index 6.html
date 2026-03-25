@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>@container / @scope Nesting Depth Test</title>
+<style>
+body { background: #111; color: #eee; font-family: monospace; padding: 20px; }
+#status { font-size: 1.2em; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h2>@container / @scope Nesting Depth Test</h2>
+<p>Tests whether deeply nested @container or @scope rules cause stack overflow.</p>
+<div id="status">Generating payload...</div>
+<div id="target" style="container-type:inline-size;width:500px;height:100px;border:2px solid white;">
+  <div style="container-type:inline-size;width:100%;">
+    Target
+  </div>
+</div>
+
+<script>
+// Generate deeply nested @container rules
+function generateNestedContainer(depth) {
+  if (depth <= 0) return 'div { color: red; }';
+  return `@container (min-width: 0px) { ${generateNestedContainer(depth - 1)} }`;
+}
+
+// Generate deeply nested @scope rules
+function generateNestedScope(depth) {
+  if (depth <= 0) return 'div { color: blue; }';
+  return `@scope (div) { ${generateNestedScope(depth - 1)} }`;
+}
+
+// Generate deeply nested @supports rules
+function generateNestedSupports(depth) {
+  if (depth <= 0) return 'div { color: green; }';
+  return `@supports (display: flex) { ${generateNestedSupports(depth - 1)} }`;
+}
+
+// Generate deeply nested @media rules
+function generateNestedMedia(depth) {
+  if (depth <= 0) return 'div { color: yellow; }';
+  return `@media all { ${generateNestedMedia(depth - 1)} }`;
+}
+
+const tests = [
+  { name: '@container', gen: generateNestedContainer },
+  { name: '@scope', gen: generateNestedScope },
+  { name: '@supports', gen: generateNestedSupports },
+  { name: '@media', gen: generateNestedMedia },
+];
+
+const depths = [100, 500, 1000, 2000, 5000];
+let testIdx = 0;
+let depthIdx = 0;
+
+function runNextTest() {
+  if (testIdx >= tests.length) {
+    document.getElementById('status').textContent += '\nAll tests complete.';
+    return;
+  }
+
+  if (depthIdx >= depths.length) {
+    testIdx++;
+    depthIdx = 0;
+    runNextTest();
+    return;
+  }
+
+  const test = tests[testIdx];
+  const depth = depths[depthIdx];
+  document.getElementById('status').textContent = `Testing ${test.name} at depth ${depth}...`;
+
+  requestAnimationFrame(() => {
+    try {
+      const css = test.gen(depth);
+      const style = document.createElement('style');
+      style.textContent = css;
+      document.head.appendChild(style);
+      getComputedStyle(document.getElementById('target')).color;
+
+      document.getElementById('status').textContent += ` OK`;
+      depthIdx++;
+      setTimeout(runNextTest, 100);
+    } catch(e) {
+      document.getElementById('status').textContent += ` ERROR: ${e.message}`;
+      depthIdx++;
+      setTimeout(runNextTest, 100);
+    }
+  });
+}
+
+setTimeout(runNextTest, 500);
+</script>
+</body>
+</html>

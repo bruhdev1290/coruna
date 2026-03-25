@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>light-dark() Recursion Depth Test</title>
+<style>
+body { background: #111; color: #eee; font-family: monospace; padding: 20px; }
+#status { font-size: 1.2em; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h2>light-dark() Recursion Depth Test</h2>
+<p>Tests whether deeply nested light-dark() causes stack overflow in Stylo CSS parser.</p>
+<p>light-dark() calls Color::parse_internal() for each argument, which can parse another light-dark().</p>
+<div id="status">Generating payload...</div>
+<div id="target" style="width:100px;height:100px;border:2px solid white;">Target</div>
+
+<script>
+// Generate deeply nested light-dark() expression
+// light-dark(light-dark(light-dark(red, blue), blue), blue)
+function generateLightDark(depth) {
+  if (depth <= 0) return 'red';
+  return `light-dark(${generateLightDark(depth - 1)}, blue)`;
+}
+
+const depths = [100, 500, 1000, 2000, 3000, 5000];
+let currentTest = 0;
+
+function runNextTest() {
+  if (currentTest >= depths.length) {
+    document.getElementById('status').textContent = 'All depths survived.';
+    return;
+  }
+  const depth = depths[currentTest];
+  document.getElementById('status').textContent = `Testing depth ${depth}...`;
+
+  requestAnimationFrame(() => {
+    try {
+      const expr = generateLightDark(depth);
+      const style = document.createElement('style');
+      style.textContent = `#target { color: ${expr}; }`;
+      document.head.appendChild(style);
+      getComputedStyle(document.getElementById('target')).color;
+
+      document.getElementById('status').textContent += ` OK (survived depth ${depth})`;
+      currentTest++;
+      setTimeout(runNextTest, 100);
+    } catch(e) {
+      document.getElementById('status').textContent = `Error at depth ${depth}: ${e.message}`;
+    }
+  });
+}
+
+setTimeout(runNextTest, 500);
+</script>
+</body>
+</html>

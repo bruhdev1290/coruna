@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HTMLSlotElement FlattenAssignedNodes Recursion Test</title>
+<style>
+body { background: #111; color: #eee; font-family: monospace; padding: 20px; }
+#status { font-size: 1.2em; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h2>Slot FlattenAssignedNodes Recursion Test</h2>
+<p>Tests whether deeply nested slot fallback content causes stack overflow in FlattenAssignedNodes().</p>
+<p>HTMLSlotElement.cpp:110-143 — recursive call with NO depth check.</p>
+<div id="status">Building DOM...</div>
+<div id="container"></div>
+
+<script>
+// FlattenAssignedNodes recurses when a slot's fallback content contains another slot.
+// We create deeply nested shadow DOMs where each shadow root has a <slot> whose
+// fallback content is another host with a shadow root containing another <slot>.
+
+function buildNestedSlots(depth) {
+  const host = document.createElement('div');
+
+  let current = host;
+  for (let i = 0; i < depth; i++) {
+    const shadow = current.attachShadow({ mode: 'open' });
+    const slot = document.createElement('slot');
+
+    // The fallback content of this slot is a new host element
+    const innerHost = document.createElement('div');
+    slot.appendChild(innerHost);
+    shadow.appendChild(slot);
+
+    current = innerHost;
+  }
+
+  // Innermost shadow with a slot that has text fallback
+  const finalShadow = current.attachShadow({ mode: 'open' });
+  const finalSlot = document.createElement('slot');
+  finalSlot.textContent = 'bottom';
+  finalShadow.appendChild(finalSlot);
+
+  return host;
+}
+
+const depths = [100, 500, 1000, 2000, 5000];
+let currentTest = 0;
+
+function runNextTest() {
+  if (currentTest >= depths.length) {
+    document.getElementById('status').textContent = 'All depths survived.';
+    return;
+  }
+
+  const depth = depths[currentTest];
+  document.getElementById('status').textContent = `Testing depth ${depth}...`;
+
+  requestAnimationFrame(() => {
+    try {
+      const container = document.getElementById('container');
+      container.innerHTML = '';
+
+      const host = buildNestedSlots(depth);
+      container.appendChild(host);
+
+      // Force layout/style computation which may trigger FlattenAssignedNodes
+      host.offsetHeight;
+
+      // Also try explicitly calling assignedNodes with flatten
+      const shadow = host.shadowRoot;
+      if (shadow) {
+        const slot = shadow.querySelector('slot');
+        if (slot) {
+          // This explicitly triggers FlattenAssignedNodes
+          const nodes = slot.assignedNodes({ flatten: true });
+          document.getElementById('status').textContent += ` OK (depth ${depth}, ${nodes.length} nodes)`;
+        }
+      }
+
+      currentTest++;
+      setTimeout(runNextTest, 200);
+    } catch(e) {
+      document.getElementById('status').textContent = `Error at depth ${depth}: ${e.message}`;
+    }
+  });
+}
+
+setTimeout(runNextTest, 500);
+</script>
+</body>
+</html>

